@@ -6,111 +6,121 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Konfigurasi Supabase (Diambil dari Environment Variables Railway)
+// Konfigurasi Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://hbvoyhobltznbosntoiu.supabase.co/functions/v1/check-domains";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhidm95aG9ibHR6bmJvc250b2l1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU1NTU3ODAsImV4cCI6MjA5MTEzMTc4MH0.vjHdvvaG-O2-l4ItfHBJziRgr8IM3r0VMzXFipZzYNE";
 
-// Middleware
-app.use(cors()); // Penting: Mengizinkan browser mengakses API ini
+app.use(cors()); // Agar bisa diakses dari mana saja
 app.use(express.json());
 
-// Health Check (Opsional, untuk cek apakah server hidup)
-app.get('/', (req, res) => {
-    res.json({ status: 'OK', message: 'Nawala Checker API is running!' });
-});
-
-// Endpoint Utama: POST /api/check
-app.post('/api/check', async (req, res) => {
+// Fungsi Helper untuk Cek Domain
+async function checkDomainStatus(domainName) {
     try {
-        const { domains } = req.body;
-
-        // Validasi Input
-        if (!domains || !Array.isArray(domains) || domains.length === 0) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Payload harus berupa JSON dengan key "domains" berisi array string. Contoh: { "domains": ["google.com"] }' 
-            });
-        }
-
-        console.log(`Received request for ${domains.length} domains.`);
-
-        const results = [];
+        // Bersihkan domain
+        let cleanDomain = domainName.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
         
-        // Proses domain satu per satu atau batch kecil untuk menghindari rate limit
-        // Kita gunakan Promise.all untuk paralel processing tapi dengan batasan
-        const BATCH_SIZE = 3; // Cek 3 domain sekaligus
-        
-        for (let i = 0; i < domains.length; i += BATCH_SIZE) {
-            const batch = domains.slice(i, i + BATCH_SIZE);
-            
-            const promises = batch.map(async (domainName) => {
-                try {
-                    // Bersihkan domain dari http/https/www jika ada
-                    let cleanDomain = domainName.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
-
-                    // Panggil Supabase Edge Function
-                    const response = await axios.post(
-                        SUPABASE_URL,
-                        { name: cleanDomain }, // Format payload yang benar: { name: "..." }
-                        {
-                            headers: {
-                                'apikey': SUPABASE_KEY,
-                                'Authorization': `Bearer ${SUPABASE_KEY}`,
-                                'Content-Type': 'application/json'
-                            },
-                            timeout: 5000 // Timeout 5 detik per request
-                        }
-                    );
-                    
-                    if (response.data && response.data.success && response.data.data && response.data.data.length > 0) {
-                        return response.data.data[0];
-                    } else {
-                        return { 
-                            domain: cleanDomain, 
-                            nawala: { blocked: false }, 
-                            network: { blocked: false },
-                            note: 'Empty response from upstream' 
-                        };
-                    }
-                } catch (error) {
-                    console.error(`Error checking ${cleanDomain}:`, error.message);
-                    return { 
-                        domain: cleanDomain, 
-                        nawala: { blocked: false }, 
-                        network: { blocked: false },
-                        error: 'Upstream API Error' 
-                    };
-                }
-            });
-
-            const batchResults = await Promise.all(promises);
-            results.push(...batchResults);
-
-            // Delay sedikit antar batch agar tidak dianggap spam oleh Supabase
-            if (i + BATCH_SIZE < domains.length) {
-                await new Promise(r => setTimeout(r, 200));
+        const response = await axios.post(
+            SUPABASE_URL,
+            { name: cleanDomain },
+            {
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 5000
             }
+        );
+        
+        if (response.data && response.data.success && response.data.data && response.data.data.length > 0) {
+            return response.data.data[0];
+        } else {
+            return { 
+                domain: cleanDomain, 
+                nawala: { blocked: false }, 
+                network: { blocked: false },
+                status: 'unknown' 
+            };
+        }
+    } catch (error) {
+        return { 
+            domain: cleanDomain, 
+            nawala: { blocked: false }, 
+            network: { blocked: false },
+            error: 'Failed to fetch data' 
+        };
+    }
+}
+
+// 1. ENDPOINT GET (Bisa dibuka langsung di Browser)
+// Cara pakai: https://api-kamu.railway.app/api/check?domain=google.com&domain=fb.com
+app.get('/api/check', async (req, res) => {
+    let domains = req.query.domain;
+
+    // Jika tidak ada parameter domain, tampilkan panduan
+    if (!domains) {
+        return res.json({
+            message: "Cara Penggunaan:",
+            example: "GET /api/check?domain=google.com&domain=facebook.com",
+            note: "Tambahkan &domain=namadomain.com untuk mengecek lebih banyak domain."
+        });
+    }
+
+    // Ubah menjadi array jika user hanya kirim 1 domain
+    if (!Array.isArray(domains)) {
+        domains = [domains];
+    }
+
+    try {
+        const results = [];
+        // Proses semua domain yang dikirim via URL
+        for (const d of domains) {
+            const result = await checkDomainStatus(d);
+            results.push(result);
+            // Delay sedikit biar tidak kena rate limit
+            await new Promise(r => setTimeout(r, 100));
         }
 
-        // Kirim Response Sukses
         res.json({
             success: true,
             count: results.length,
-            data: results
+            queried_domains: domains,
+            results: results
         });
 
     } catch (error) {
-        console.error('Server Critical Error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Internal Server Error', 
-            details: error.message 
-        });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// Start Server
+// 2. ENDPOINT POST (Untuk Aplikasi/HTML Form)
+// Body: { "domains": ["google.com", "fb.com"] }
+app.post('/api/check', async (req, res) => {
+    const { domains } = req.body;
+
+    if (!domains || !Array.isArray(domains)) {
+        return res.status(400).json({ error: 'Kirim JSON: { "domains": ["contoh.com"] }' });
+    }
+
+    try {
+        const results = [];
+        for (const d of domains) {
+            const result = await checkDomainStatus(d);
+            results.push(result);
+            await new Promise(r => setTimeout(r, 100));
+        }
+
+        res.json({
+            success: true,
+            count: results.length,
+            results: results
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`🔗 Local URL: http://localhost:${PORT}`);
+    console.log(`Server ready at port ${PORT}`);
 });
